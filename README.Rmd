@@ -2,7 +2,7 @@
 title: "Transcriptional and translational dynamics underlying heat shock response in the thermophilic Crenarchaeon *Sulfolobus acidocaldarius*"
 output:
   github_document:
-    toc: false
+    toc: true
     toc_depth: 4
   highlight: github
 link-citations: true
