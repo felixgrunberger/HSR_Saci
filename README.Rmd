@@ -1,0 +1,46 @@
+---
+title: "Transcriptional and translational dynamics underlying heat shock response in the thermophilic Crenarchaeon *Sulfolobus acidocaldarius*"
+output:
+  github_document:
+    toc: false
+    toc_depth: 4
+  highlight: github
+link-citations: true
+always_allow_html: true
+bibliography: HSR_Saci.bib
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "README-"
+)
+```
+
+
+*********  
+
+## About this repository  
+This is the repository for the manuscript "Transcriptional and translational dynamics underlying heat shock response in the thermophilic Crenarchaeon *Sulfolobus acidocaldarius*" (Rani Baes *et al*). 
+
+## Analysis   
+### TMT-labeled Liquid Chromatography-Tandem-Mass-Spectrometry   
+> Compare Supplementary Methods section in the Supplementary Information.    
+
+Differential protein expression analysis was performed using the DEqMS pipeline for TMT-labeled MS data [@zhu_deqms_2020]. To this end, protein abundance values were log2 transformed, replicate outliers removed and data normalized to have equal medians in all samples. Benjamini-Hochberg corrected p-values [@benjamini_controlling_1995] were considered statistically significant at a threshold <  0.05.   
+The protein expression analysis workflow can be found in the [DEqMS folder](DEqMS).  
+
+
+
+
+*********  
+## License  
+This project is under the general MIT License - see the [LICENSE](LICENSE) file for details
+
+*********  
+## References  
+
+

@@ -8,50 +8,27 @@ response in the thermophilic Crenarchaeon *Sulfolobus acidocaldarius*
 
 ## About this repository
 
-This is the repository for the manuscript “Insights into rRNA processing
-and modifications in Archaea using Nanopore-based RNA sequencing”.
+This is the repository for the manuscript “Transcriptional and
+translational dynamics underlying heat shock response in the
+thermophilic Crenarchaeon *Sulfolobus acidocaldarius*” (Rani Baes *et
+al*).
 
-The repository is currently actively developed.
+## Analysis
 
-[![Active
-Development](https://img.shields.io/badge/Maintenance%20Level-Actively%20Developed-brightgreen.svg)](https://gist.github.com/cheerfulstoic/d107229326a01ff0f333a1d3476e068d)
+### TMT-labeled Liquid Chromatography-Tandem-Mass-Spectrometry
 
-<!--## Full documentation here  
-https://felixgrunberger.github.io/rRNA_maturation/
--->
+> Compare Supplementary Methods section in the Supplementary
+> Information.
 
-## Preprint
-
-This work is based on our previous preprint: [Exploring prokaryotic
-transcription, operon structures, rRNA maturation and modifications
-using Nanopore-based native RNA
-sequencing.](%22https://www.biorxiv.org/content/10.1101/2019.12.18.880849v2.full%22)
-
-## What can you find here
-
-A description of the workflow using publicly available tools used to
-basecall, demultiplex, trim and map (*direct cDNA*) data and data
-preparation for modified base detection (*using direct RNA*) can be
-found in the [pipeline](pipeline) section.
-
-Downstream analysis, including  
-- quality control  
-- detection of rRNA processing sites and classification of rRNA
-intermediates  
-- Circular RNA detection  
-- Modified base detection  
-are based on custom Rscripts that are also described in the
-[pipeline](pipeline) section.
-
-## Data availability
-
-Raw direct RNA data (gzipped raw FAST5 files) have been uploaded to the
-Sequence Read Archive (SRA) and are available under project accession
-number [PRJNA632538](https://www.ncbi.nlm.nih.gov/sra/?term=PRJNA632538)
-(WT run: SRR11991303, ∆KsgA run: SRR11991308).  
-Direct cDNA data are available at the European Nucleotide Archive (ENA,
-<https://www.ebi.ac.uk/ena>) under project accession number PRJEB57168.
-ERP142133 ERR10466882
+Differential protein expression analysis was performed using the DEqMS
+pipeline for TMT-labeled MS data ([Zhu et al.
+2020](#ref-zhu_deqms_2020)). To this end, protein abundance values were
+log2 transformed, replicate outliers removed and data normalized to have
+equal medians in all samples. Benjamini-Hochberg corrected p-values
+([Benjamini and Hochberg 1995](#ref-benjamini_controlling_1995)) were
+considered statistically significant at a threshold \< 0.05.  
+The protein expression analysis workflow can be found in the [DEqMS
+folder](DEqMS).
 
 ------------------------------------------------------------------------
 
@@ -59,3 +36,30 @@ ERP142133 ERR10466882
 
 This project is under the general MIT License - see the
 [LICENSE](LICENSE) file for details
+
+------------------------------------------------------------------------
+
+## References
+
+<div id="refs" class="references csl-bib-body hanging-indent">
+
+<div id="ref-benjamini_controlling_1995" class="csl-entry">
+
+Benjamini, Yoav, and Yosef Hochberg. 1995. “Controlling the False
+Discovery Rate: A Practical and Powerful Approach to Multiple Testing.”
+*Journal of the Royal Statistical Society: Series B (Methodological)* 57
+(1): 289–300. <https://doi.org/10.1111/j.2517-6161.1995.tb02031.x>.
+
+</div>
+
+<div id="ref-zhu_deqms_2020" class="csl-entry">
+
+Zhu, Yafeng, Lukas M. Orre, Yan Zhou Tran, Georgios Mermelekas, Henrik
+J. Johansson, Alina Malyutina, Simon Anders, and Janne Lehtiö. 2020.
+“DEqMS: A Method for Accurate Variance Estimation in Differential
+Protein Expression Analysis.” *Molecular & Cellular Proteomics: MCP* 19
+(6): 1047–57. <https://doi.org/10.1074/mcp.TIR119.001646>.
+
+</div>
+
+</div>
