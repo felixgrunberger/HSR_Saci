@@ -30,6 +30,665 @@ considered statistically significant at a threshold \< 0.05.
 The protein expression analysis workflow can be found in the [DEqMS
 folder](DEqMS).
 
+### arCOG enrichment analyisis
+
+Archaeal Clusters of Orthologous Genes (arCOGs) classification was
+retrieved from Makarova, Wolf, and Koonin
+([2015](#ref-makarova_archaeal_2015)) followed by manual revision. Gene
+set enrichment analysis of arCOGs was performed using the goseq package
+in R, which accounts for gene lengths bias ([Young et al.
+2010](#ref-young_gene_2010)). Next, p-values for over- and
+underrepresentation of arCOG terms in the differentially expressed genes
+were calculated separately for up- and downregulated genes based on
+RNA-seq and MS data, respectively, and were considered as significantly
+enriched/unenriched below a cutoff of 0.05.
+
+``` r
+# load libraries 
+library(Biostrings)
+library(ape)
+library(vroom)
+library(goseq)
+library(tidyverse)
+library(here)
+library(readxl)
+library(ggpubr)
+
+# function to read in RNA-seq tables 
+read_in_data <- function(fileLoc, decisionTop, decisionDown){
+  
+  read_xlsx(fileLoc) %>%
+    dplyr::rename(locus_tag = 1) %>%
+    dplyr::select(-c(2:8)) %>%
+    dplyr::rename(log2FC_15 = 2,log2FC_30 = 3,log2FC_60 = 4,
+                  FDR_15 = 5, FDR_30 = 6, FDR_60 = 7) %>%
+    pivot_longer(cols = log2FC_15:log2FC_60, names_to = "time", values_to = "log2FC") %>%
+    pivot_longer(cols = FDR_15:FDR_60, names_to = "time2", values_to = "FDR") %>%
+    dplyr::mutate(time = str_split_fixed(time, "_", 2)[,2],
+                  time2 = str_split_fixed(time2, "_", 2)[,2]) %>%
+    dplyr::filter(time == time2) %>%
+    dplyr::select(-time2) %>%
+    dplyr::mutate(type_of_regulation = case_when((log2FC > decisionTop & FDR < 0.05) ~ "up",
+                                                 (log2FC < decisionDown & FDR < 0.05) ~ "down",
+                                                 (FDR >= 0.05) ~ "rest")) 
+}
+
+
+get_ms <- function(inputDF, which_time){
+  
+  if(which_time == "15min"){
+    wantedCols <- c(1,2,3)
+  } else if (which_time == "30min"){
+    wantedCols <- c(1,5,6)
+  } else if (which_time == "60min"){
+    wantedCols <- c(1,8,9)
+  }
+  
+  
+  read_xlsx(inputDF)[wantedCols] %>%
+    dplyr::rename(log2FC = 2, FDR= 3) %>%
+    dplyr::mutate(type_of_regulation = case_when((log2FC > 0 & FDR < 0.05) ~ "up",
+                                                 (log2FC < 0 & FDR < 0.05) ~ "down",
+                                                 (FDR > 0.05) ~ "rest")) %>%
+    dplyr::mutate(old_locus_tag = NA, counts_ctrl = 0, counts_set = 0) %>%
+    dplyr::select(locus_tag, old_locus_tag, type_of_regulation, log2FC, FDR, counts_ctrl, counts_set)
+}
+
+calc_goseq_results_prior <- function(complete_set, annotation_table, interested_type){
+  
+  # > all genes 
+  assayed.genes <- complete_set %>%
+    dplyr::distinct(locus_tag, .keep_all = T) %>%
+    dplyr::select(locus_tag) %>%
+    deframe() 
+  
+  # > get differentially expressed locus_tags
+  de.genes      <- complete_set %>%
+    dplyr::distinct(locus_tag, .keep_all = T) %>%
+    dplyr::filter(type_of_regulation %in% interested_type) %>%
+    dplyr::select(locus_tag) %>%
+    deframe()
+  
+  # > get de-genes and background set in a list
+  gene.vector=as.integer(assayed.genes%in%de.genes)
+  names(gene.vector)=assayed.genes
+  
+  # > add length information for calculations
+  lengthGenes <- complete_set %>%
+    left_join(annotation_table) %>%
+    distinct(locus_tag, .keep_all = T) %>%
+    dplyr::select(width) %>%
+    deframe()
+  
+  # > calc arcog enrichment
+  pwf <- goseq::nullp(gene.vector, bias.data =lengthGenes,'ensGene',plot.fit=FALSE)
+  
+  # > add arcog identifier
+    category_mapping <- annotation_table %>%
+      dplyr::rename(arCOG = category) %>%
+      dplyr::filter(locus_tag %in% names(gene.vector)) %>%
+      dplyr::select(locus_tag, arCOG) %>%
+      as.data.frame()
+    
+    category.vector <- category_mapping$arCOG
+    names(category.vector) <- as.factor(category_mapping$locus_tag)
+  # > goseq & correct for multiple testing using BH   
+    goseq_results <- goseq(pwf, gene2cat = category_mapping, use_genes_without_cat=TRUE) %>%
+      #dplyr::mutate(over_represented_padj = p.adjust(over_represented_pvalue, method = "BH"),
+      #              under_represented_padj = p.adjust(under_represented_pvalue,  method = "BH")) %>%
+      as_tibble() %>%
+      mutate(regulation_type = interested_type) %>%
+      left_join(arcog_info) %>%
+      dplyr::mutate(expected = numInCat*sum(numDEInCat)/sum(numInCat),
+                    deviation_from_expected = numDEInCat/expected)
+  return(goseq_results)
+}
+
+merge_go_seq <- function(set1, set2, fdr = 0.05, timepoint, myMet){
+  rbind(set1, set2) %>%
+    dplyr::mutate(deviation_from_expected = ifelse(regulation_type == "down",-deviation_from_expected, deviation_from_expected),
+                  pval_group = ifelse(over_represented_pvalue < fdr, "over-represented",
+                                      ifelse(under_represented_pvalue < fdr, "under-represented", "else")),
+                  group = timepoint) %>%
+    dplyr::mutate(pg2 = -log10(over_represented_pvalue),
+                  pg3 = log10(under_represented_pvalue),
+                  pg4 = pmax(abs(pg2), abs(pg3)),
+                  pg4 = case_when(pg4-pg2 == 0 ~ pg4,
+                                  pg4+pg3 == 0 ~ -pg4)) %>%
+    dplyr::mutate(cat_n = paste0(big_category, "_",category, "_", category_name, " (",category,")"),
+                  method = myMet)
+}
+
+# data ----
+## genome data ====
+### DNA ####
+sac_fasta <- readDNAStringSet(here("data/genome/NC_007181.1.fasta"))
+names(sac_fasta) <- "chr"
+
+### NCBI annotation ####
+sac_gff <- read.gff(here("data/genome/NC_007181.1.gff3")) %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::mutate(locus_tag = str_split_fixed(str_split_fixed(attributes, ";old_",2)[,1],"locus_tag=",2)[,2],
+                old_locus_tag = str_split_fixed(attributes, "old_locus_tag=",2)[,2],
+                width = abs(start-end)) %>%
+  dplyr::select(locus_tag,old_locus_tag,start, end, strand,width)
+
+sac_names <- read.gff(here("data/genome/NC_007181.1.gff3")) %>%
+  dplyr::filter(type == "CDS") %>%
+  dplyr::mutate(locus_tag = str_split_fixed(str_split_fixed(attributes, ";product",2)[,1],"locus_tag=",2)[,2],
+                product = str_split_fixed(str_split_fixed(attributes, ";protein_id",2)[,1],"product=",2)[,2]) %>%
+  dplyr::select(locus_tag, product)
+
+## arCOG ====
+### arcog info ####
+arcog_info <- vroom(here("data/arCOG/funclass.tab.txt"), col_names = F) %>%
+  dplyr::select(-2) %>%
+  dplyr::rename(category = 1, category_name = 2) %>%
+  dplyr::mutate(big_category = ifelse(category %in% 1:4, category, NA),
+                big_category_name = ifelse(category %in% 1:4, category_name, NA)) %>%
+  fill(big_category,.direction = "down") %>%
+  fill(big_category_name,.direction = "down") %>%
+  dplyr::filter(!category %in% 1:4)
+
+### custom arcog annotation ####
+sac_arcog <- read_xlsx(here("data/arCOG/20220218_Saci_all arCOG.xlsx")) %>% 
+  dplyr::rename(locus_tag = 1, old_locus_tag = 2, category = 3)
+
+## combine ====
+sac_gff_arcog <- sac_gff %>%
+  left_join(sac_arcog, by = "locus_tag") %>%
+  left_join(arcog_info, by = "category") %>%
+  dplyr::mutate(category = ifelse(category == "EF", "E", 
+                                  ifelse(category == "s", "S", 
+                                         ifelse(is.na(category), "S",category)))) %>%
+  left_join(sac_names)
+
+## time dependent table ====
+sac_exp_t <- here("data/RNA/20220407_RNA-Seq incl tRNA.xlsx")
+
+rna_all <- read_in_data(sac_exp_t,0, 0)
+
+ms_file <- here("tables/DEqMS_PSM.xlsx")
+ms15 <- get_ms(ms_file,"15min")
+ms30 <- get_ms(ms_file,"30min")
+ms60 <- get_ms(ms_file,"60min")
+
+
+## goseq ====
+### arcog ####
+goseq_rna15   <- merge_go_seq(calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 15), sac_gff_arcog, interested_type = "up"),
+                              calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 15), sac_gff_arcog, interested_type = "down"),
+                              timepoint = "15min", fdr = 0.1, myMet = "RNA")
+goseq_rna30   <- merge_go_seq(calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 30), sac_gff_arcog, interested_type = "up"),
+                              calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 30), sac_gff_arcog, interested_type = "down"),
+                              timepoint = "30min", fdr = 0.1, myMet = "RNA")
+goseq_rna60   <- merge_go_seq(calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 60), sac_gff_arcog, interested_type = "up"),
+                              calc_goseq_results_prior(rna_all %>% dplyr::filter(time == 60), sac_gff_arcog, interested_type = "down"),
+                              timepoint = "60min", fdr = 0.1, myMet = "RNA")
+
+goseq_ms15   <- merge_go_seq(calc_goseq_results_prior(ms15, sac_gff_arcog, interested_type = "up"),
+                             calc_goseq_results_prior(ms15, sac_gff_arcog, interested_type = "down"),
+                             timepoint = "15minMS", fdr = 0.1, myMet = "MS")
+goseq_ms30   <- merge_go_seq(calc_goseq_results_prior(ms30, sac_gff_arcog, interested_type = "up"),
+                             calc_goseq_results_prior(ms30, sac_gff_arcog, interested_type = "down"),
+                             timepoint = "30minMS", fdr = 0.1, myMet = "MS")
+goseq_ms60   <- merge_go_seq(calc_goseq_results_prior(ms60, sac_gff_arcog, interested_type = "up"),
+                             calc_goseq_results_prior(ms60, sac_gff_arcog, interested_type = "down"),
+                             timepoint = "60minMS", fdr = 0.1, myMet = "MS")
+
+#### plotting ####
+goseq_arcog_all     <- bind_rows(goseq_rna15,
+                                 goseq_rna30,
+                                 goseq_rna60,
+                                 goseq_ms15,
+                                 goseq_ms30,
+                                 goseq_ms60)
+
+arcog_plot <- ggplot(data = goseq_arcog_all %>% dplyr::mutate(time = substr(group, 1,5)), 
+       aes(x = deviation_from_expected, y = forcats::fct_rev(reorder(cat_n,cat_n)), 
+           group = method,color = pval_group,
+           fill = pval_group)) +
+  facet_grid(cols = vars(time), scales = "free") +
+  geom_rect(aes(xmin=-1, xmax=1, ymin = -Inf, ymax = Inf), fill = "grey90", color = NA) +
+  geom_vline(xintercept = 0) +
+  scale_fill_manual(values = c("white", "#FFB000", "#1A6ED9")) +
+  scale_color_manual(values = c("white", "#FFB000", "#1A6ED9")) +
+  geom_bar(stat = "identity", width = 0.75,color = "black",
+           position = position_dodge(width = 0.75)) +
+  scale_x_continuous(limits = c(-max(abs(goseq_arcog_all$deviation_from_expected)),
+                                max(abs(goseq_arcog_all$deviation_from_expected)))) +
+  theme_pubclean() +
+  theme(axis.ticks.y = element_blank()) +
+  ylab("") +
+  xlab("") +
+  guides(fill = "none")
+
+arcog_plot
+```
+
+![](README-unnamed-chunk-2-1.png)<!-- -->
+
+### Correlation analysis between RNA-seq and MS data
+
+Pearson correlation coefficients were calculated from RNA-seq and MS
+log2 transformed count data and were used to analyze the association
+between the two methods.
+
+### Promoter motif analysis
+
+Promoter motif analysis was performed by considering previously
+determined positions of primary transcription start sites (TSSs) ([Cohen
+et al. 2016](#ref-Cohen2016)). Sequences were extracted in a
+strand-specific way from -50 to +1 nt from each TSS and plotted in R
+using the ggseqlogo package ([Wagih 2017](#ref-Wagih2017)).
+
+``` r
+# libraries ----
+library(ggseqlogo)
+library(ggsci)
+library(ggtext)
+library(patchwork)
+
+# functions ----
+read_in_data <- function(fileLoc, decisionTop, decisionDown){
+  
+  read_xlsx(fileLoc) %>%
+    dplyr::rename(locus_tag = 1) %>%
+    dplyr::select(-c(2:8)) %>%
+    dplyr::rename(log2FC_15 = 2,log2FC_30 = 3,log2FC_60 = 4,
+                  FDR_15 = 5, FDR_30 = 6, FDR_60 = 7) %>%
+    pivot_longer(cols = log2FC_15:log2FC_60, names_to = "time", values_to = "log2FC") %>%
+    pivot_longer(cols = FDR_15:FDR_60, names_to = "time2", values_to = "FDR") %>%
+    dplyr::mutate(time = str_split_fixed(time, "_", 2)[,2],
+                  time2 = str_split_fixed(time2, "_", 2)[,2]) %>%
+    dplyr::filter(time == time2) %>%
+    dplyr::select(-time2) %>%
+    dplyr::mutate(type_of_regulation = case_when((log2FC > decisionTop & FDR < 0.05) ~ "up",
+                                                 (log2FC < decisionDown & FDR < 0.05) ~ "down",
+                                                 (FDR >= 0.05) ~ "rest")) 
+}
+
+get_set <- function(my_data, my_time, my_type_reg, my_cut_off, myDown){
+  
+  my_data %>%
+    dplyr::filter(time == my_time,
+                  type_of_regulation == my_type_reg,
+                  abs(log2FC) >= my_cut_off,
+                  !is.na(TSS)) %>%
+    rowwise() %>%
+    dplyr::mutate(seq = case_when(strand == "+"~ as.character(sac_fasta$chr[(TSS-50):(TSS+myDown)]),
+                                  strand == "-"~ as.character(reverseComplement(sac_fasta$chr[(TSS-myDown):(TSS+50)]))))  
+}
+
+get_raw_utr5 <- function(myDown){
+  
+  sac_utr5 %>%
+    rowwise() %>%
+    dplyr::mutate(seq = case_when(strand == "+"~ as.character(sac_fasta$chr[(TSS-50):(TSS+myDown)]),
+                                strand == "-"~ as.character(reverseComplement(sac_fasta$chr[(TSS-myDown):(TSS+50)]))))
+}
+
+plot_sac_motif <- function(dataset, tit){
+  ggplot() +
+    labs(title = paste0(tit,": ", nrow(dataset))) +
+    geom_rect(aes(xmin = 15.5, xmax = 19.5, ymin = 0, ymax = 1.25), fill = "#8591B3", alpha = 0.4) +
+    geom_rect(aes(xmin = 20.5, xmax = 28.5, ymin = 0, ymax = 1.25), fill = "#A1CEC2", alpha = 0.4) +
+    geom_rect(aes(xmin = 40.5, xmax = 41.5, ymin = 0, ymax = 1.25), fill = "#D45C38", alpha = 0.4) +
+    geom_rect(aes(xmin = 50.5, xmax = 51.5, ymin = 0, ymax = 1.25), fill = "#7A624A", alpha = 0.4) +
+    geom_hline(yintercept = 1.25, linetype = "solid") +
+    geom_hline(yintercept = 1, linetype = "dashed", alpha = 0.5) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.5) +
+    geom_hline(yintercept = 0, linetype = "solid") +
+    geom_logo({{dataset}}$seq, font = "helvetica_bold",  seq_type = "dna", col_scheme = color_scale) + 
+    theme_logo() +
+    theme(panel.grid.major = element_line(colour = NA),
+          axis.ticks.x = element_line(colour = NA), 
+          axis.text.x = element_text(size = 0),
+          axis.text.y = element_text(size = 8),
+          axis.title.y = element_text(size = 8),
+          plot.margin = unit(c(0.1,0.1,0.1,0.1),"pt"),
+          plot.title = element_textbox_simple(hjust = 0,size = 8,
+                                              width = NULL,face = "bold",
+                                              padding = margin(3, 3, 3, 3),
+                                              margin = margin(2, 0, 1, 0),
+                                              linetype = 1,
+                                              r = grid::unit(2, "pt"),
+                                              fill = "cornsilk")) +
+    scale_x_continuous(expand = c(0,0)) +
+    scale_y_continuous(limits = c(0,1.25), 
+                       breaks = c(0,0.5,1),
+                       expand = c(0,0)) 
+}
+
+# data ----
+## genome ====
+### FASTA ####
+sac_fasta <- readDNAStringSet(here("data/genome/NC_007181.1.fasta"))
+names(sac_fasta) <- "chr"
+
+### GFF3 ####
+sac_gff <- read.gff(here("data/genome/NC_007181.1.gff3")) %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::mutate(locus_tag = str_split_fixed(str_split_fixed(attributes, ";old_",2)[,1],"locus_tag=",2)[,2],
+                old_locus_tag = str_split_fixed(attributes, "old_locus_tag=",2)[,2],
+                width = abs(start-end)) %>%
+  dplyr::select(locus_tag,old_locus_tag,start, end, strand,width)
+
+## utr5 data ====
+sac_utr5 <- read_xlsx(here("data/utr5/Transcriptome Cohen 2016_SACI.xlsx")) %>%
+  left_join(sac_gff, by = c("Locus" = "old_locus_tag")) %>%
+  dplyr::rename(utr5 = `5UTR length`) %>%
+  dplyr::filter(utr5 != "NA",
+                locus_tag!= "NA") %>%
+  dplyr::mutate(utr5 = as.numeric(utr5),
+                TSS = case_when(strand == "+" ~ start - utr5,
+                                strand == "-" ~ end + utr5)) 
+
+## rna seq data ====
+rna_counts <- read_in_data(here("data/RNA/20220407_RNA-Seq incl tRNA.xlsx"),0, 0) %>%
+  left_join(sac_utr5 %>% 
+              dplyr::select(TSS, locus_tag, utr5, strand), 
+            by = "locus_tag") 
+
+# exploratory ----
+## color scale ====
+color_scale = make_col_scheme(chars=c('A', 'T', 'C', 'G'), 
+                              cols=pal_npg()(10)[c(1,3,2,10)])
+
+## plot motifs ==== 
+### 15 min ####
+a1 <- plot_sac_motif(get_raw_utr5(50), "all")
+a2 <- plot_sac_motif(get_set(rna_counts,"15", "up", 0, 50), "up")
+a3 <- plot_sac_motif(get_set(rna_counts,"15", "down", 0, 50), "down")
+a4 <- plot_sac_motif(get_set(rna_counts,"15", "up", 2, 50), "strongly up")
+a5 <- plot_sac_motif(get_set(rna_counts,"15", "down", 2, 50), "strongly down")  
+
+a1 + a2 + a3 + a4 + a5 + patchwork::plot_layout(nrow = 5) + plot_annotation(
+  title = 'Promoter motifs (-50:+50 from TSS)',
+  subtitle = 'HS 15 min')
+```
+
+![](README-unnamed-chunk-3-1.png)<!-- -->
+
+``` r
+
+### 30 min ####
+a1 <- plot_sac_motif(get_raw_utr5(50), "all")
+a2 <- plot_sac_motif(get_set(rna_counts,"30", "up", 0, 50), "up")
+a3 <- plot_sac_motif(get_set(rna_counts,"30", "down", 0, 50), "down")
+a4 <- plot_sac_motif(get_set(rna_counts,"30", "up", 2, 50), "strongly up")
+a5 <- plot_sac_motif(get_set(rna_counts,"30", "down", 2, 50), "strongly down")  
+a1 + a2 + a3 + a4 + a5 + patchwork::plot_layout(nrow = 5) + plot_annotation(
+  title = 'Promoter motifs (-50:+50 from TSS)',
+  subtitle = 'HS 30 min')
+```
+
+![](README-unnamed-chunk-3-2.png)<!-- -->
+
+``` r
+
+### 60 min ####
+a1 <- plot_sac_motif(get_raw_utr5(50), "all")
+a2 <- plot_sac_motif(get_set(rna_counts,"60", "up", 0, 50), "up")
+a3 <- plot_sac_motif(get_set(rna_counts,"60", "down", 0, 50), "down")
+a4 <- plot_sac_motif(get_set(rna_counts,"60", "up", 2, 50), "strongly up")
+a5 <- plot_sac_motif(get_set(rna_counts,"60", "down", 2, 50), "strongly down")  
+a1 + a2 + a3 + a4 + a5 + patchwork::plot_layout(nrow = 5) + plot_annotation(
+  title = 'Promoter motifs (-50:+50 from TSS)',
+  subtitle = 'HS 60 min')
+```
+
+![](README-unnamed-chunk-3-3.png)<!-- -->
+
+``` r
+
+# > adjust myDown in get_set for smaller motifs
+```
+
+### UTR5/UTR3 analysis
+
+- Primary transcription start sites for UTR5 analysis from Cohen et al.
+  ([2016](#ref-Cohen2016))  
+- Primary transcription termination sites for UTR3 analysis from Dar et
+  al. ([2016](#ref-Dar2016a))
+
+``` r
+# functions ----
+read_in_data_rna <- function(fileLoc, decisionTop, decisionDown){
+  
+  read_xlsx(fileLoc) %>%
+    dplyr::rename(locus_tag = 1) %>%
+    dplyr::select(-c(2:8)) %>%
+    dplyr::rename(log2FC_15 = 2,log2FC_30 = 3,log2FC_60 = 4,
+                  FDR_15 = 5, FDR_30 = 6, FDR_60 = 7) %>%
+    pivot_longer(cols = log2FC_15:log2FC_60, names_to = "time", values_to = "log2FC") %>%
+    pivot_longer(cols = FDR_15:FDR_60, names_to = "time2", values_to = "FDR") %>%
+    dplyr::mutate(time = str_split_fixed(time, "_", 2)[,2],
+                  time2 = str_split_fixed(time2, "_", 2)[,2]) %>%
+    dplyr::filter(time == time2) %>%
+    dplyr::select(-time2) %>%
+    dplyr::mutate(type_of_regulation = case_when((log2FC > decisionTop & FDR < 0.05) ~ "up",
+                                                 (log2FC < decisionDown & FDR < 0.05) ~ "down",
+                                                 (FDR >= 0.05) ~ "rest")) 
+}
+
+read_in_data_ms <- function(fileLoc, decisionTop, decisionDown){
+  
+  read_xlsx(fileLoc) %>%
+    dplyr::rename(locus_tag = 1) %>%
+    dplyr::select(c(1,2,3,5,6,8,9)) %>%
+    dplyr::rename(log2FC_15 = 2,log2FC_30 = 4,log2FC_60 = 6,
+                  FDR_15 = 3, FDR_30 = 5, FDR_60 = 7) %>%
+    dplyr::select(c(1,2,4,6,3,5,7)) %>%
+    pivot_longer(cols = log2FC_15:log2FC_60, names_to = "time", values_to = "log2FC") %>%
+    pivot_longer(cols = FDR_15:FDR_60, names_to = "time2", values_to = "FDR") %>%
+    dplyr::mutate(time = str_split_fixed(time, "_", 2)[,2],
+                  time2 = str_split_fixed(time2, "_", 2)[,2]) %>%
+    dplyr::filter(time == time2) %>%
+    dplyr::select(-time2) %>%
+    dplyr::mutate(type_of_regulation = case_when((log2FC > decisionTop & FDR < 0.05) ~ "up",
+                                                 (log2FC < decisionDown & FDR < 0.05) ~ "down",
+                                                 (FDR >= 0.05) ~ "rest")) 
+}
+
+# data ----
+## genome ====
+### FASTA ####
+sac_fasta <- readDNAStringSet(here("data/genome/NC_007181.1.fasta"))
+names(sac_fasta) <- "chr"
+
+### GFF3 ####
+sac_gff <- ape::read.gff(here("data/genome/NC_007181.1.gff3")) %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::mutate(locus_tag = str_split_fixed(str_split_fixed(attributes, ";old_",2)[,1],"locus_tag=",2)[,2],
+                old_locus_tag = str_split_fixed(attributes, "old_locus_tag=",2)[,2],
+                width = abs(start-end)) %>%
+  dplyr::select(locus_tag,old_locus_tag,start, end, strand,width)
+
+## utr5 data ====
+sac_utr5 <- read_xlsx(here("data/utr5/Transcriptome Cohen 2016_SACI.xlsx")) %>%
+  left_join(sac_gff, by = c("Locus" = "old_locus_tag")) %>%
+  dplyr::rename(utr5 = `5UTR length`) %>%
+  dplyr::filter(utr5 != "NA",
+                locus_tag!= "NA") %>%
+  dplyr::mutate(utr5 = as.numeric(utr5),
+                TSS = case_when(strand == "+" ~ start - utr5,
+                                strand == "-" ~ end + utr5)) %>%
+  dplyr::select(locus_tag, utr5) 
+
+## utr3 data ====
+sac_utr3 <- read_xlsx(here("data/utr3/utr3_sorek.xlsx"), sheet = "Table S6") %>%
+  dplyr::rename(locus_tag = 1, old_locus_tag = 2, TTS = 6, TTS_fold = 11) %>%
+  dplyr::select(locus_tag, old_locus_tag, TTS, TTS_fold) %>%
+  left_join(sac_gff, by = c("locus_tag")) %>%
+  dplyr::mutate(utr3 = case_when(strand == "+" ~ TTS - end,
+                                 strand == "-" ~ start - TTS)) %>%
+  dplyr::select(locus_tag, utr3)
+
+## DE gene data - RNAseq ====
+rna_counts <- read_in_data_rna(here("data/RNA/20220407_RNA-Seq incl tRNA.xlsx"),0, 0) %>%
+  left_join(sac_utr5) %>%
+  left_join(sac_utr3) %>%
+  dplyr::mutate(dataType = "rna") %>%
+  pivot_longer(cols = c(utr5,utr3), names_to = "end", values_to = "utr") %>%
+  mutate(category=cut(utr, breaks = c(-1,0,10,20,30,40,50,60,70,80,90,100,150,200,300)))
+
+## DE gene data - MS ====
+ms_counts <- read_in_data_ms(here("tables/DEqMS_PSM.xlsx"),0,0) %>%
+  left_join(sac_utr5) %>%
+  left_join(sac_utr3) %>%
+  dplyr::mutate(dataType = "ms") %>%
+  pivot_longer(cols = c(utr5,utr3), names_to = "end", values_to = "utr") %>%
+  mutate(category=cut(utr, breaks = c(-1,0,10,20,30,40,50,60,70,80,90,100,150,200,300)))
+
+## combine data ====
+all_counts <- bind_rows(rna_counts, 
+                        ms_counts) 
+
+# exploratory analysis ----
+## comparison - UTR5 ====
+bg_dist_utr5 <- sac_utr5 %>%
+  mutate(category=cut(utr5, breaks = c(-1,0,10,20,30,40,50,60,70,80,90,100,150,200,300)),
+         total = nrow(.)) %>%
+  group_by(category) %>%
+  summarise(n = n(),
+            frac = round(n/total*100,1)) %>%
+  distinct(category, n, frac) %>%
+  dplyr::mutate(text_col = ifelse(frac >= 30, "1", "2"),
+                type_of_regulation = "all") 
+  
+utr5_rna <- rna_counts %>%
+  dplyr::filter(end == "utr5") %>%
+  complete(time,category, type_of_regulation) %>%
+  dplyr::mutate(counter = ifelse(!is.na(locus_tag), 1, 0)) %>%
+  group_by(time, type_of_regulation, category) %>%
+  dplyr::filter(!is.na(category),
+                !is.na(type_of_regulation)) %>%
+  summarise(n = sum(counter)) %>%
+  group_by(time, type_of_regulation) %>%
+  dplyr::mutate(frac = n/sum(n)*100,
+                text_col = ifelse(frac >= 30, "1", "2")) %>%
+  bind_rows(bg_dist_utr5 %>% dplyr::mutate(time = "15"),
+            bg_dist_utr5 %>% dplyr::mutate(time = "30"),
+            bg_dist_utr5 %>% dplyr::mutate(time = "60")) %>%
+  dplyr::filter(type_of_regulation != "rest")
+
+utr5_protein <- ms_counts %>%
+  dplyr::filter(end == "utr5") %>%
+  complete(time,category, type_of_regulation) %>%
+  dplyr::mutate(counter = ifelse(!is.na(locus_tag), 1, 0)) %>%
+  group_by(time, type_of_regulation, category) %>%
+  dplyr::filter(!is.na(category),
+                !is.na(type_of_regulation)) %>%
+  summarise(n = sum(counter)) %>%
+  group_by(time, type_of_regulation) %>%
+  dplyr::mutate(frac = n/sum(n)*100,
+                text_col = ifelse(frac >= 30, "1", "2")) %>%
+  bind_rows(bg_dist_utr5 %>% dplyr::mutate(time = "15"),
+            bg_dist_utr5 %>% dplyr::mutate(time = "30"),
+            bg_dist_utr5 %>% dplyr::mutate(time = "60")) %>%
+  dplyr::filter(type_of_regulation != "rest")
+
+setF <- utr5_rna %>% 
+  dplyr::mutate(set = paste0(time, "_rna_", type_of_regulation)) %>%
+  dplyr::filter(set != "30_rna_all",
+                set != "60_rna_all") %>%
+  bind_rows(utr5_protein %>% 
+              dplyr::mutate(set = paste0(time, "_protein_", type_of_regulation)) %>%
+              dplyr::filter(set != "15_protein_all",
+                            set != "30_protein_all",
+                            set != "60_protein_all"))
+
+ggplot() +
+  geom_bar(data = setF,
+           aes(x = set, y = frac, fill = fct_rev(category)),
+               stat = "identity", color = "black") +
+  scale_fill_viridis_d(option = "magma") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90),
+        panel.grid.major = element_blank()) +
+  geom_text(data = setF %>%
+              group_by(set) %>%
+              summarise(n = sum(n)),
+            aes(x = set,y = 110, label = n))
+```
+
+![](README-unnamed-chunk-4-1.png)<!-- -->
+
+``` r
+
+
+## comparison - UTRr ====
+bg_dist_utr3 <- sac_utr3 %>%
+  mutate(category=cut(utr3, breaks = c(-1,0,10,20,30,40,50,60,70,80,90,100,150,200,300))) %>%
+  dplyr::filter(!is.na(category)) %>%
+  dplyr::mutate(total = nrow(.)) %>%
+  group_by(category) %>%
+  summarise(n = n(),
+            frac = round(n/total*100,1)) %>%
+  distinct(category, n, frac) %>%
+  dplyr::mutate(text_col = ifelse(frac >= 30, "1", "2"),
+                type_of_regulation = "all") 
+
+utr3_rna <- rna_counts %>%
+  dplyr::filter(end == "utr3") %>%
+  complete(time,category, type_of_regulation) %>%
+  dplyr::mutate(counter = ifelse(!is.na(locus_tag), 1, 0)) %>%
+  group_by(time, type_of_regulation, category) %>%
+  dplyr::filter(!is.na(category),
+                !is.na(type_of_regulation)) %>%
+  summarise(n = sum(counter)) %>%
+  group_by(time, type_of_regulation) %>%
+  dplyr::mutate(frac = n/sum(n)*100,
+                text_col = ifelse(frac >= 30, "1", "2")) %>%
+  bind_rows(bg_dist_utr3 %>% dplyr::mutate(time = "15"),
+            bg_dist_utr3 %>% dplyr::mutate(time = "30"),
+            bg_dist_utr3 %>% dplyr::mutate(time = "60")) %>%
+  dplyr::filter(type_of_regulation != "rest") 
+
+utr3_protein <- ms_counts %>%
+  dplyr::filter(end == "utr3") %>%
+  complete(time,category, type_of_regulation) %>%
+  dplyr::mutate(counter = ifelse(!is.na(locus_tag), 1, 0)) %>%
+  group_by(time, type_of_regulation, category) %>%
+  dplyr::filter(!is.na(category),
+                !is.na(type_of_regulation)) %>%
+  summarise(n = sum(counter)) %>%
+  group_by(time, type_of_regulation) %>%
+  dplyr::mutate(frac = n/sum(n)*100,
+                text_col = ifelse(frac >= 30, "1", "2")) %>%
+  bind_rows(bg_dist_utr3 %>% dplyr::mutate(time = "15"),
+            bg_dist_utr3 %>% dplyr::mutate(time = "30"),
+            bg_dist_utr3 %>% dplyr::mutate(time = "60")) %>%
+  dplyr::filter(type_of_regulation != "rest") 
+
+
+setF2 <- utr3_rna %>% 
+  dplyr::mutate(set = paste0(time, "_rna_", type_of_regulation)) %>%
+  dplyr::filter(set != "30_rna_all",
+                set != "60_rna_all") %>%
+  bind_rows(utr3_protein %>% 
+              dplyr::mutate(set = paste0(time, "_protein_", type_of_regulation)) %>%
+              dplyr::filter(set != "15_protein_all",
+                            set != "30_protein_all",
+                            set != "60_protein_all"))
+
+ggplot() +
+  geom_bar(data = setF2,
+           aes(x = set, y = frac, fill = fct_rev(category)),
+           stat = "identity", color = "black") +
+  scale_fill_viridis_d(option = "magma") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90),
+        panel.grid.major = element_blank()) +
+  geom_text(data = setF2 %>%
+              group_by(set) %>%
+              summarise(n = sum(n)),
+            aes(x = set,y = 110, label = n))
+```
+
+![](README-unnamed-chunk-4-2.png)<!-- -->
+
 ------------------------------------------------------------------------
 
 ## License
@@ -49,6 +708,51 @@ Benjamini, Yoav, and Yosef Hochberg. 1995. “Controlling the False
 Discovery Rate: A Practical and Powerful Approach to Multiple Testing.”
 *Journal of the Royal Statistical Society: Series B (Methodological)* 57
 (1): 289–300. <https://doi.org/10.1111/j.2517-6161.1995.tb02031.x>.
+
+</div>
+
+<div id="ref-Cohen2016" class="csl-entry">
+
+Cohen, Ofir, Shany Doron, Omri Wurtzel, Daniel Dar, Sarit Edelheit, Iris
+Karunker, Eran Mick, and Rotem Sorek. 2016. “Comparative Transcriptomics
+Across the Prokaryotic Tree of Life.” *Nucleic Acids Research*.
+<https://doi.org/10.1093/nar/gkw394>.
+
+</div>
+
+<div id="ref-Dar2016a" class="csl-entry">
+
+Dar, Daniel, Daniela Prasse, Ruth A. Schmitz, and Rotem Sorek. 2016.
+“Widespread Formation of Alternative 3′ UTR Isoforms via Transcription
+Termination in Archaea.” *Nature Microbiology* 1 (10): 16143.
+<https://doi.org/10.1038/nmicrobiol.2016.143>.
+
+</div>
+
+<div id="ref-makarova_archaeal_2015" class="csl-entry">
+
+Makarova, Kira S., Yuri I. Wolf, and Eugene V. Koonin. 2015. “Archaeal
+Clusters of Orthologous Genes (<span class="nocase">arCOGs</span>): An
+Update and Application for Analysis of Shared Features Between
+Thermococcales, Methanococcales, and Methanobacteriales.” *Life (Basel,
+Switzerland)* 5 (1): 818–40. <https://doi.org/10.3390/life5010818>.
+
+</div>
+
+<div id="ref-Wagih2017" class="csl-entry">
+
+Wagih, Omar. 2017. “Ggseqlogo: A Versatile R Package for Drawing
+Sequence Logos.” *Bioinformatics*.
+<https://doi.org/10.1093/bioinformatics/btx469>.
+
+</div>
+
+<div id="ref-young_gene_2010" class="csl-entry">
+
+Young, Matthew D., Matthew J. Wakefield, Gordon K. Smyth, and Alicia
+Oshlack. 2010. “Gene Ontology Analysis for RNA-Seq: Accounting for
+Selection Bias.” *Genome Biology* 11 (2): R14.
+<https://doi.org/10.1186/gb-2010-11-2-r14>.
 
 </div>
 

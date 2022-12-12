@@ -1,5 +1,7 @@
 .Rproj.user
+.Rproj
 .Rhistory
 .RData
 .Ruserdata
 .Rmd
+.DS_Store
